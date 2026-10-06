@@ -2,7 +2,8 @@ import os
 import subprocess
 import logging
 import re
-from google import genai
+import google.generativeai as genai
+from google.api_core.exceptions import NotFound
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -15,10 +16,28 @@ class FullyAutonomousBuilder:
         if not self.api_key:
             raise ValueError("❌ خطأ: مفتاح GEMINI_API_KEY غير موجود في ملف .env!")
             
-        self.client = genai.Client(api_key=self.api_key)
-        self.model = "gemini-1.5-flash"
+        self.model_name = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+        genai.configure(api_key=self.api_key)
+        try:
+            self.model = genai.GenerativeModel(model_name=self.model_name)
+        except NotFound:
+            self._report_model_not_found()
+            raise
         self.repo_url = repo_url
         logger.info("🤖 تم تهيئة الأجينت المستقل بنجاح وجاهز لتنفيذ طلباتك بالكامل!")
+
+    def _report_model_not_found(self) -> None:
+        supported_models = sorted(
+            model.name
+            for model in genai.list_models()
+            if "generateContent" in model.supported_generation_methods
+        )
+        logger.error(
+            "Gemini model '%s' was not found. Models supporting "
+            "generateContent: %s",
+            self.model_name,
+            ", ".join(supported_models) or "(none returned)",
+        )
 
     def execute_terminal(self, command: str) -> str:
         logger.info(f"💻 تنفيذ أمر النظام: {command}")
@@ -79,10 +98,13 @@ class FullyAutonomousBuilder:
         for step in range(12):
             logger.info(f"--- [الخطوة التشغيلية {step + 1}] الأجينت يحلل، يكتب، ويدقق... ---")
             
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=current_prompt,
-            )
+            try:
+                response = self.model.generate_content(
+                    contents=current_prompt,
+                )
+            except NotFound:
+                self._report_model_not_found()
+                raise
             
             reply = response.text
             print(f"\n🤖 رد الأجينت:\n{reply}\n")

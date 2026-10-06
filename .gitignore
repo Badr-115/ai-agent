@@ -1,4 +1,6 @@
 
 .env
+ai-agent.zip
 *.zip
 __pycache__/
+my_auto_project/
