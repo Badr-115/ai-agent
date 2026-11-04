@@ -8,7 +8,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
-Action = Literal["list_files", "read_file", "search_text", "write_file", "run_check", "finish"]
+Action = Literal["list_files", "read_file", "search_text", "preview_file", "write_file", "run_check", "finish"]
 
 
 class AgentStep(BaseModel):
@@ -29,6 +29,7 @@ class RunStatus(str, Enum):
     UNVERIFIED_CHANGES = "unverified_changes"
     INCOMPLETE = "incomplete"
     FAILED = "failed"
+    ROLLED_BACK = "rolled_back"
 
 
 class AuditEvent(BaseModel):
