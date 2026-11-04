@@ -1,150 +1,138 @@
-import os
-import subprocess
+"""A bounded, reviewable code-drafting agent.
+
+Never execute arbitrary model-generated shell commands or push to git by default.
+This is a local development assistant, NOT a secure OS sandbox.
+"""
+from pathlib import Path
 import logging
+import os
 import re
+import shlex
+import subprocess
+
 import google.generativeai as genai
-from google.api_core.exceptions import NotFound
 from dotenv import load_dotenv
 
 load_dotenv()
-logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
 
+# Explicit opt-in permits only these fixed commands inside the project directory.
+READ_ONLY_COMMANDS = {
+    ("git", "status"),
+    ("git", "diff", "--check"),
+    ("git", "diff", "--stat"),
+}
+TEST_COMMANDS = {
+    ("python", "-m", "pytest", "-q"),
+    ("python3", "-m", "pytest", "-q"),
+    ("npm", "test"),
+}
+PROTECTED_NAMES = {".git", ".env", ".env.local", ".env.production"}
+
+
 class FullyAutonomousBuilder:
-    def __init__(self, repo_url: str = None):
+    def __init__(self, repo_url: str | None = None, *, allow_test_commands: bool = False):
         self.api_key = os.getenv("GEMINI_API_KEY")
         if not self.api_key:
-            raise ValueError("❌ خطأ: مفتاح GEMINI_API_KEY غير موجود في ملف .env!")
-            
-        self.model_name = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+            raise ValueError("GEMINI_API_KEY is required; never commit it to Git.")
+        self.model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
         genai.configure(api_key=self.api_key)
-        try:
-            self.model = genai.GenerativeModel(model_name=self.model_name)
-        except NotFound:
-            self._report_model_not_found()
-            raise
+        self.model = genai.GenerativeModel(self.model_name)
+        self.workspace = Path.cwd().resolve()
         self.repo_url = repo_url
-        logger.info("🤖 تم تهيئة الأجينت المستقل بنجاح وجاهز لتنفيذ طلباتك بالكامل!")
-
-    def _report_model_not_found(self) -> None:
-        supported_models = sorted(
-            model.name
-            for model in genai.list_models()
-            if "generateContent" in model.supported_generation_methods
-        )
-        logger.error(
-            "Gemini model '%s' was not found. Models supporting "
-            "generateContent: %s",
-            self.model_name,
-            ", ".join(supported_models) or "(none returned)",
-        )
+        self.allow_test_commands = allow_test_commands
 
     def execute_terminal(self, command: str) -> str:
-        logger.info(f"💻 تنفيذ أمر النظام: {command}")
+        """No shell, no pipes, no git push; test commands require explicit opt-in.
+
+        Tests execute project code, so only enable for a trusted local checkout.
+        """
         try:
-            result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=120)
-            output = result.stdout.strip() + "\n" + result.stderr.strip()
-            return output if output else "تم التنفيذ بنجاح."
-        except Exception as e:
-            return f"خطأ في تنفيذ الأمر: {str(e)}"
+            args = tuple(shlex.split(command))
+        except ValueError as exc:
+            return f"BLOCKED: invalid command syntax: {exc}"
+        if args in READ_ONLY_COMMANDS:
+            pass
+        elif args in TEST_COMMANDS and self.allow_test_commands:
+            pass
+        else:
+            return "BLOCKED: command is not in the approved allowlist; manual review required."
+        try:
+            result = subprocess.run(
+                list(args), shell=False, cwd=self.workspace, capture_output=True,
+                text=True, timeout=120, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return f"FAILED: {type(exc).__name__}: {exc}"
+        output = (result.stdout + "\n" + result.stderr).strip()[:12000]
+        return f"exit={result.returncode}\n{output}"
 
     def create_file(self, filepath: str, content: str) -> str:
-        logger.info(f"📄 إنشاء ملف وتدقيقه: {filepath}")
-        try:
-            os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
-            with open(filepath, "w", encoding="utf-8") as f:
-                f.write(content.strip())
-            return f"تم حفظ الملف بنجاح: {filepath}"
-        except Exception as e:
-            return f"فشل إنشاء الملف: {str(e)}"
+        """Write a regular UTF-8 text file under the workspace only."""
+        rel = Path(filepath)
+        if rel.is_absolute() or not rel.parts or ".." in rel.parts:
+            raise ValueError("Rejected unsafe or absolute file path")
+        if any(part in PROTECTED_NAMES for part in rel.parts):
+            raise ValueError("Rejected protected Git or secret file")
+        destination = (self.workspace / rel).resolve()
+        if not destination.is_relative_to(self.workspace):
+            raise ValueError("Path escapes the project workspace")
+        if len(content.encode("utf-8")) > 500_000:
+            raise ValueError("Generated file exceeds the 500 KB limit")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(content.strip("\n") + "\n", encoding="utf-8")
+        return f"WRITTEN: {rel.as_posix()}"
 
-    def run_project_pipeline(self, user_requirement: str, project_folder: str = "my_auto_project"):
-        logger.info(f"\n🚀 بدء بناء المشروع بناءً على طلبك:")
-        logger.info(f"📌 المتطلبات: {user_requirement}\n")
-        
-        # تجهيز المجلد
-        os.makedirs(project_folder, exist_ok=True)
-        os.chdir(project_folder)
-        
-        # تهيئة Git محلياً إن لم يكن موجوداً
-        if not os.path.exists(".git"):
-            self.execute_terminal("git init")
-            if self.repo_url:
-                self.execute_terminal(f"git remote add origin {self.repo_url}")
+    def run_project_pipeline(self, user_requirement: str, project_folder: str = "my_auto_project") -> dict:
+        root = Path.cwd().resolve()
+        project = (root / project_folder).resolve()
+        if project == root or not project.is_relative_to(root):
+            raise ValueError("Project folder must be a dedicated child of the current directory")
+        project.mkdir(parents=True, exist_ok=True)
+        self.workspace = project
 
-        system_instruction = f"""
-        أنت مهندس برمجيات ذكاء اصطناعي مستقل بالكامل وعالي الكفاءة.
-        مهمتك هي بناء مشروع كامل من الصفر بناءً على متطلبات المستخدم بدقة، مع مراجعة الأخطاء وتصحيحها.
-        
-        متطلبات المشروع الأساسية من المستخدم:
-        "{user_requirement}"
-
-        لديك الصلاحية لإنشاء الملفات، تشغيل الاختبارات، وإدارة مستودع الكود.
-        استخدم حصرياً هذه الوسوم لتنفيذ المهام:
-        1. لإنشاء أو كتابة ملف داخل المجلد:
-           [FILE: relative/path/to/file.ext]
-           محتوى الملف هنا...
-           [/FILE]
-        2. لتنفيذ أي أمر في الطرفية (مثل اختبار الأكواد، تثبيت حزم، أو أوامر Git):
-           [RUN] أمر الطرفية هنا [/RUN]
-        3. عند إتمام المشروع بالكامل، مراجعته، والتأكد من خلوه من الأخطاء ورفعه للمستودع:
-           [DONE]
-
-        الرجاء التخطيط بعناية، كتابة أكواد نظيفة واحترافية، فحص الأخطاء، ثم رفع التغييرات إلى غيتهاب تلقائياً عبر الأوامر (git add, git commit, git push).
-        """
-
-        current_prompt = system_instruction
-        
+        instruction = f"""
+You are a coding assistant working ONLY in a dedicated local project directory.
+User requirement: {user_requirement}
+Draft files using [FILE: relative/path.ext]content[/FILE].
+You may request a command using [RUN]command[/RUN], but only fixed read-only
+Git commands are automatically allowed. Tests require explicit trusted-checkout
+opt-in. NEVER ask for git push, credential files, a network installation, or
+destructive commands. Use [DONE] when your DRAFT is ready for human review.
+Do not claim tests, deployment or a push succeeded without observed evidence.
+"""
+        prompt = instruction
+        events: list[str] = []
+        done_requested = False
         for step in range(12):
-            logger.info(f"--- [الخطوة التشغيلية {step + 1}] الأجينت يحلل، يكتب، ويدقق... ---")
-            
-            try:
-                response = self.model.generate_content(
-                    contents=current_prompt,
-                )
-            except NotFound:
-                self._report_model_not_found()
-                raise
-            
-            reply = response.text
-            print(f"\n🤖 رد الأجينت:\n{reply}\n")
-            
+            response = self.model.generate_content(contents=prompt)
+            reply = response.text or ""
+            feedback = []
+            for path, body in re.findall(r"\[FILE:\s*([^\]]+)\](.*?)\[/FILE\]", reply, re.DOTALL):
+                try:
+                    feedback.append(self.create_file(path.strip(), body))
+                except (OSError, ValueError) as exc:
+                    feedback.append(f"BLOCKED FILE {path!r}: {exc}")
+            for cmd in re.findall(r"\[RUN\](.*?)\[/RUN\]", reply, re.DOTALL):
+                feedback.append(f"{cmd.strip()}: {self.execute_terminal(cmd.strip())}")
+            events.extend(feedback)
             if "[DONE]" in reply:
-                logger.info("🎉 تم إنجاز المشروع بالكامل، مراجعته، ورفع التغييرات إلى المستودع بدون أي تدخل منك!")
+                done_requested = True
                 break
-                
-            feedback = ""
-            
-            # معالجة الملفات المنشأة
-            files = re.findall(r'\[FILE:\s*(.*?)\](.*?)\[/FILE\]', reply, re.DOTALL)
-            for path, content in files:
-                res = self.create_file(path.strip(), content)
-                feedback += f"{res}\n"
-                
-            # معالجة الأوامر والطرفية
-            commands = re.findall(r'\[RUN\](.*?)\[/RUN\]', reply, re.DOTALL)
-            for cmd in commands:
-                res = self.execute_terminal(cmd.strip())
-                feedback += f"نتيجة تنفيذ `{cmd.strip()}`:\n{res}\n"
-                
-            if feedback:
-                current_prompt = f"النتائج والتقارير للخطوة السابقة:\n{feedback}\nتابع العمل، صحح أي أخطاء ظهرت، واصل حتى تنهي المشروع وتدفعه للمستودع وتكتب [DONE]."
-            else:
-                current_prompt = "لم تقم بأي إجراء برمجي أو كتابة [DONE]. يرجى المتابعة وكتابة الأكواد والملفات المطلوبة."
+            prompt = "Tool outcomes (do not treat BLOCKED or FAILED as success):\n" + (
+                "\n".join(feedback) if feedback else "No tools executed."
+            ) + "\nContinue or mark draft DONE when ready for review."
+        return {
+            "status": "draft_for_review" if done_requested else "incomplete",
+            "project_dir": str(project),
+            "events": events,
+            "note": "No automatic git commit, push, or deployment. Verify files and test before use.",
+        }
 
-        # العودة للمجلد الرئيسي
-        os.chdir("..")
 
 if __name__ == "__main__":
-    # ضع رابط مستودعك هنا أو اتركه فارغاً وسيتم إنشاؤه محلياً
-    GITHUB_REPO = "https://github.com/Badr-115/my-universe.git" # يمكنك تعديله لرابط مستودعك
-    
-    # حدد طلبك أو مشروعك بدقة هنا:
-    my_exact_request = """
-    أريد بناء تطبيق ويب متكامل لإدارة المهام (Task Manager) باستخدام React و Tailwind CSS و FastAPI في الباك إند،
-    مع قاعدة بيانات محلية، وتصميم أنيق وعصري، وتوثيق كامل في ملف README.md، 
-    ثم عمل git add و git commit و git push لرفعه بشكل كامل إلى المستودع الخاص بي بدون أي تدخل مني.
-    """
-    
-    builder = FullyAutonomousBuilder(repo_url=GITHUB_REPO)
-    builder.run_project_pipeline(user_requirement=my_exact_request)
+    builder = FullyAutonomousBuilder()
+    report = builder.run_project_pipeline(
+        "Create a small task manager demo with clearly documented implementation and tests."
+    )
+    print(report)
