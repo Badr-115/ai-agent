@@ -1,26 +1,22 @@
 from loguru import logger
 from core.schemas import Plan
 from providers.base import LLMProvider
-from execution.engine import ExecutionEngine
+from execution.engine import ExecutionEngine, TaskExecutor
+
 
 class AgentOrchestrator:
-    def __init__(self, provider: LLMProvider):
+    def __init__(self, provider: LLMProvider, executor: TaskExecutor | None = None):
         self.provider = provider
-        self.engine = ExecutionEngine()
-        
+        self.engine = ExecutionEngine(executor)
+
     async def process_request(self, user_request: str):
-        logger.info("يتم الآن تحليل طلبك وبناء الخطة...")
-        prompt = f"Create an execution plan for: '{user_request}'"
-        
+        logger.info("Planning request...")
         plan = await self.provider.generate_structured(
-            prompt=prompt,
+            prompt=f"Create an execution plan for: {user_request!r}",
             schema=Plan,
-            system_prompt="Break down tasks logically into a plan."
+            system_prompt="Break down tasks logically into a plan.",
         )
-        
-        logger.info(f"تم إنشاء الخطة وتتضمن {len(plan.tasks)} مهام.")
-        
+        logger.info("Plan contains %s tasks", len(plan.tasks))
         for task in plan.tasks:
             await self.engine.execute_task(task)
-            
-        logger.info("انتهت العملية بالكامل.")
+        return plan
