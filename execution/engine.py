@@ -19,7 +19,7 @@ class ExecutionEngine:
         if self.executor is None:
             task.status = TaskStatus.FAILED
             task.error = "No task executor configured; task was not executed."
-            logger.warning("Task %s was not executed", task.id)
+            logger.warning("Task {} was not executed", task.id)
             return False
         try:
             result = await self.executor(task)
@@ -31,5 +31,5 @@ class ExecutionEngine:
         except Exception as exc:
             task.error = f"{type(exc).__name__}: {exc}"
             task.status = TaskStatus.FAILED
-            logger.error("Task %s failed: %s", task.id, task.error)
+            logger.error("Task {} failed: {}", task.id, task.error)
             return False
