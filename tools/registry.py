@@ -86,10 +86,10 @@ class ToolRegistry:
         # unittest discover can exit zero when no tests were found: that is not evidence.
         if argv in OPT_IN_CHECKS and "unittest" in argv:
             import re
-            match = re.search(r"Ran (\\d+) tests?", output)
+            match = re.search(r"Ran (\d+) tests?", output)
             if not match or int(match.group(1)) == 0:
                 passed = False
-                output += "\\nFAILED: no executed unittest cases could be verified."
+                output += "\nFAILED: no executed unittest cases could be verified."
         return self._output(
             "run_check",
             f"command={command}\nexit_code={completed.returncode}\n{output}",
