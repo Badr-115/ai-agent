@@ -16,7 +16,7 @@ class AgentOrchestrator:
             schema=Plan,
             system_prompt="Break down tasks logically into a plan.",
         )
-        logger.info("Plan contains %s tasks", len(plan.tasks))
+        logger.info("Plan contains {} tasks", len(plan.tasks)
         for task in plan.tasks:
             await self.engine.execute_task(task)
         return plan
