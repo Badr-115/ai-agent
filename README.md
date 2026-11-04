@@ -30,7 +30,7 @@ python -m unittest discover -s tests -v
 
 ## Opt in to the Gemini API
 
-The model can incur API charges depending on the provider/account and tokens used. Never place credentials in committed files.
+The model can incur API charges depending on the provider/account and tokens used. Never place credentials in committed files. **Gemini receives the task prompt and excerpts of files read by the agent, which could include your private source code.** Only connect workspaces you are willing to share with that provider. The filename filter is not a guarantee that sensitive text is absent from otherwise ordinary files.
 
 \`\`\`bash
 export GEMINI_API_KEY="YOUR_KEY_IN_YOUR_LOCAL_SHELL"
