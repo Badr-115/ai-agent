@@ -60,7 +60,7 @@ class CodingAgent:
         for step_no in range(1, self.max_steps + 1):
             prompt = (
                 f"GOAL: {goal}\n"
-                f"Workspace: {self.tools.workspace.root}\n"
+                "Workspace: a selected local directory (use relative paths only)\n"
                 f"Permissions: writes={self.tools.allow_writes}, "
                 f"test_commands={self.tools.allow_checks}\n"
                 f"Remaining model steps: {self.max_steps - step_no + 1}; "
@@ -101,6 +101,15 @@ class CodingAgent:
 
             result = self.tools.invoke(step)
             summary = f"{result.summary} ({step.path or step.command or step.query or ''})"
+            # Surface small, host-observed evidence (not source contents) in the report.
+            if step.action == "run_check":
+                exit_line = next(
+                    (line for line in result.feedback.splitlines() if line.startswith("exit_code=")), None
+                )
+                if exit_line:
+                    summary += f" | {exit_line}"
+            elif step.action == "write_file":
+                summary += f" | {result.feedback[:145]}"
             events.append(AuditEvent(step=step_no, tool=step.action,
                                      ok=result.ok, summary=summary[:1000]))
             transcript.append(
