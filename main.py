@@ -59,7 +59,7 @@ async def execute(args: argparse.Namespace) -> int:
     )
     report = await CodingAgent(
         GeminiProvider(model=args.model), registry, max_steps=args.max_steps,
-    ).run(args.goal))
+    ).run(args.goal)
     print(report.model_dump_json(indent=2))
     return 0 if report.status in {RunStatus.INSPECTED, RunStatus.VERIFIED_LOCAL} else 2
 
