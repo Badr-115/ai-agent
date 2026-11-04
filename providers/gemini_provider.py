@@ -1,135 +1,42 @@
-import os
-from typing import Any, Type
+"""Gemini integration using the maintained google-genai Python SDK.
 
-import google.generativeai as genai
-from google.api_core.exceptions import NotFound
+Network access, quota, and possible API charges occur ONLY when this provider
+is explicitly selected. CI never instantiates it.
+"""
+import os
+from typing import Type
+
+from google import genai
+from google.genai import types
 from pydantic import BaseModel
 
 from .base import LLMProvider
 
 
 class GeminiProvider(LLMProvider):
-
-    def __init__(self):
-        self.api_key = os.getenv("GEMINI_API_KEY")
-
-        if not self.api_key:
-            raise ValueError(
-                "GEMINI_API_KEY is not set in the environment."
-            )
-
-        self.model_name = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
-        genai.configure(api_key=self.api_key)
-        try:
-            self.model = genai.GenerativeModel(model_name=self.model_name)
-        except NotFound:
-            self._report_model_not_found()
-            raise
-
-    def _report_model_not_found(self) -> None:
-        supported_models = sorted(
-            model.name
-            for model in genai.list_models()
-            if "generateContent" in model.supported_generation_methods
-        )
-        print(
-            f"Gemini model '{self.model_name}' was not found. "
-            "Models supporting generateContent: "
-            f"{', '.join(supported_models) or '(none returned)'}"
-        )
-
-    @classmethod
-    def _to_gemini_schema(
-        cls,
-        schema: dict[str, Any],
-        definitions: dict[str, Any],
-    ) -> dict[str, Any]:
-        reference = schema.get("$ref")
-        if reference:
-            definition_name = reference.rsplit("/", 1)[-1]
-            return cls._to_gemini_schema(
-                definitions[definition_name],
-                definitions,
-            )
-
-        alternatives = schema.get("anyOf")
-        if alternatives:
-            non_nullable = [
-                option for option in alternatives
-                if option.get("type") != "null"
-            ]
-            if len(non_nullable) == 1:
-                converted = cls._to_gemini_schema(non_nullable[0], definitions)
-                converted["nullable"] = True
-                return converted
-
-        schema_type = schema.get("type")
-        gemini_schema: dict[str, Any] = {}
-        if schema_type:
-            gemini_schema["type"] = {
-                "object": "OBJECT",
-                "array": "ARRAY",
-                "string": "STRING",
-                "integer": "INTEGER",
-                "number": "NUMBER",
-                "boolean": "BOOLEAN",
-            }[schema_type]
-
-        if "description" in schema:
-            gemini_schema["description"] = schema["description"]
-        if "enum" in schema:
-            gemini_schema["enum"] = schema["enum"]
-        if "required" in schema:
-            gemini_schema["required"] = schema["required"]
-        if "properties" in schema:
-            gemini_schema["properties"] = {
-                name: cls._to_gemini_schema(property_schema, definitions)
-                for name, property_schema in schema["properties"].items()
-            }
-        if "items" in schema:
-            gemini_schema["items"] = cls._to_gemini_schema(
-                schema["items"],
-                definitions,
-            )
-
-        return gemini_schema
+    def __init__(self, *, api_key: str | None = None, model: str | None = None):
+        key = api_key or os.getenv("GEMINI_API_KEY")
+        if not key:
+            raise ValueError("GEMINI_API_KEY is missing; offline --demo requires no key.")
+        self.model_name = model or os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        self.client = genai.Client(api_key=key)
 
     async def generate_structured(
-        self,
-        prompt: str,
-        schema: Type[BaseModel],
+        self, prompt: str, schema: Type[BaseModel],
         system_prompt: str | None = None,
     ) -> BaseModel:
-        json_schema = schema.model_json_schema()
-        definitions = json_schema.get("$defs", {})
-        response_schema = self._to_gemini_schema(
-            json_schema,
-            definitions,
+        config = types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=schema,
+            system_instruction=system_prompt,
+            temperature=0.2,
         )
-        model = self.model
-        if system_prompt:
-            model = genai.GenerativeModel(
-                model_name=self.model_name,
-                system_instruction=system_prompt,
-            )
-
-        try:
-            response = await model.generate_content_async(
-                contents=prompt,
-                generation_config={
-                    "response_mime_type": "application/json",
-                    "response_schema": response_schema,
-                },
-            )
-        except NotFound:
-            self._report_model_not_found()
-            raise
-
-        result_text = response.text
-
-        if not result_text:
-            raise ValueError(
-                "Gemini returned an empty response."
-            )
-
-        return schema.model_validate_json(result_text)
+        response = await self.client.aio.models.generate_content(
+            model=self.model_name, contents=prompt, config=config,
+        )
+        parsed = response.parsed
+        if isinstance(parsed, schema):
+            return parsed
+        if not response.text:
+            raise ValueError("Model returned no structured JSON; no tool was executed.")
+        return schema.model_validate_json(response.text)

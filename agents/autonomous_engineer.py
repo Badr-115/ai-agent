@@ -10,7 +10,7 @@ import re
 import shlex
 import subprocess
 
-import google.generativeai as genai
+from google import genai
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -36,8 +36,7 @@ class FullyAutonomousBuilder:
         if not self.api_key:
             raise ValueError("GEMINI_API_KEY is required; never commit it to Git.")
         self.model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-        genai.configure(api_key=self.api_key)
-        self.model = genai.GenerativeModel(self.model_name)
+        self.client = genai.Client(api_key=self.api_key)
         self.workspace = Path.cwd().resolve()
         self.repo_url = repo_url
         self.allow_test_commands = allow_test_commands
@@ -105,7 +104,7 @@ Do not claim tests, deployment or a push succeeded without observed evidence.
         events: list[str] = []
         done_requested = False
         for step in range(12):
-            response = self.model.generate_content(contents=prompt)
+            response = self.client.models.generate_content(model=self.model_name, contents=prompt)
             reply = response.text or ""
             feedback = []
             for path, body in re.findall(r"\[FILE:\s*([^\]]+)\](.*?)\[/FILE\]", reply, re.DOTALL):
