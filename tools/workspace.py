@@ -2,8 +2,10 @@
 
 This limits accidental access; it is not an operating-system sandbox.
 """
+import difflib
 import hashlib
 import os
+from dataclasses import dataclass
 from pathlib import Path
 import stat
 import tempfile
@@ -25,6 +27,19 @@ class WorkspaceError(ValueError):
     """The requested file or operation is outside the permitted workspace policy."""
 
 
+@dataclass(frozen=True)
+class FilePreview:
+    path: str
+    before_sha256: str
+    after_sha256: str
+    diff: str
+    changed: bool
+
+
+def _digest(value: bytes | None) -> str:
+    return "missing" if value is None else hashlib.sha256(value).hexdigest()
+
+
 class Workspace:
     def __init__(self, root: str | Path, *, max_file_bytes: int = 120_000,
                  max_total_write_bytes: int = 500_000):
@@ -35,6 +50,9 @@ class Workspace:
         self.max_total_write_bytes = max_total_write_bytes
         self.bytes_written = 0
         self.changed_files: list[str] = []
+        self._original_bytes: dict[str, bytes | None] = {}
+        self._original_modes: dict[str, int] = {}
+        self._latest_digests: dict[str, str] = {}
 
     @staticmethod
     def _denied(part: str) -> bool:
@@ -120,7 +138,44 @@ class Workspace:
                         return "\n".join(matches) + "\n[matches limited]"
         return "\n".join(matches) or "[no matches]"
 
-    def write_file(self, name: str, content: str) -> str:
+    def preview_write(self, name: str, content: str) -> FilePreview:
+        """Show an exact proposed change, including a baseline digest for conflict checks.
+
+        Preview never creates/modifies a file. No unbounded reads, binary overwrites
+        or symlink targets are accepted. A workspace directory is assumed trusted.
+        """
+        if not isinstance(content, str):
+            raise WorkspaceError("Content must be UTF-8 text.")
+        data = content.encode("utf-8")
+        if len(data) > self.max_file_bytes:
+            raise WorkspaceError("File exceeds write limit.")
+        target = self.resolve(name)
+        if target.exists() and not target.is_file():
+            raise WorkspaceError("Cannot replace a directory/device.")
+        if target.exists() and target.stat().st_size > self.max_file_bytes:
+            raise WorkspaceError("Existing file exceeds review limit.")
+        before = target.read_bytes() if target.exists() else None
+        try:
+            original = before.decode("utf-8") if before is not None else ""
+        except UnicodeError as exc:
+            raise WorkspaceError("Cannot modify non-UTF-8 or binary files.") from exc
+        lines = difflib.unified_diff(
+            original.splitlines(keepends=True),
+            content.splitlines(keepends=True),
+            fromfile=f"a/{name}" if before is not None else "/dev/null",
+            tofile=f"b/{name}",
+            lineterm="\n",
+        )
+        diff = "".join(lines)
+        if len(diff) > 12000:
+            diff = diff[:12000] + "\n[preview truncated]\n"
+        return FilePreview(
+            path=name, before_sha256=_digest(before), after_sha256=_digest(data),
+            diff=diff if diff else "[no changes]", changed=(before != data),
+        )
+
+    def write_file(self, name: str, content: str, *,
+                   expected_sha256: str | None = None) -> str:
         if not isinstance(content, str):
             raise WorkspaceError("Content must be UTF-8 text.")
         encoded = content.encode("utf-8")
@@ -131,7 +186,16 @@ class Workspace:
         target = self.resolve(name)
         if target.exists() and not target.is_file():
             raise WorkspaceError("Cannot overwrite a directory/device.")
+        if target.exists() and target.stat().st_size > self.max_file_bytes:
+            raise WorkspaceError("Existing file exceeds review limit.")
         old = target.read_bytes() if target.exists() else None
+        if expected_sha256 is not None and _digest(old) != expected_sha256:
+            raise WorkspaceError("File changed after preview; review again before writing.")
+        if old is not None:
+            try:
+                old.decode("utf-8")
+            except UnicodeError as exc:
+                raise WorkspaceError("Cannot overwrite non-UTF-8 or binary files.") from exc
         if old == encoded:
             return f"UNCHANGED {name}"
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -148,6 +212,12 @@ class Workspace:
                 os.fsync(f.fileno())
             os.chmod(handle, old_mode)
             os.replace(handle, target)
+            # Snapshot only after the write succeeds, preserving the first original
+            # value even when a model revisits the same file.
+            if name not in self._original_bytes:
+                self._original_bytes[name] = old
+                self._original_modes[name] = old_mode
+            self._latest_digests[name] = _digest(encoded)
         finally:
             if handle is not None:
                 handle.unlink(missing_ok=True)
@@ -156,3 +226,45 @@ class Workspace:
             self.changed_files.append(name)
         digest = hashlib.sha256(encoded).hexdigest()[:16]
         return f"WRITTEN {name}: {len(encoded)} bytes; sha256-prefix={digest}"
+
+
+    def rollback_changes(self) -> list[str]:
+        """Restore this session's original bytes, refusing external modifications.
+
+        Preflight checks all changed files before restoring any. This is not an
+        ACID transaction across multiple files or an OS-level sandbox.
+        """
+        items = list(reversed(self.changed_files))
+        for name in items:
+            target = self.resolve(name)
+            current = target.read_bytes() if target.exists() and target.is_file() else None
+            if _digest(current) != self._latest_digests.get(name):
+                raise WorkspaceError(f"Rollback conflict on {name}: file was modified externally.")
+        reverted = []
+        for name in items:
+            target = self.resolve(name)
+            original = self._original_bytes[name]
+            if original is None:
+                target.unlink()
+            else:
+                temp_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(
+                        mode="wb", dir=target.parent, prefix=".agent-restore-", delete=False
+                    ) as stream:
+                        temp_path = Path(stream.name)
+                        stream.write(original)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    os.chmod(temp_path, self._original_modes[name])
+                    os.replace(temp_path, target)
+                finally:
+                    if temp_path is not None:
+                        temp_path.unlink(missing_ok=True)
+            reverted.append(name)
+        self.changed_files.clear()
+        self._original_bytes.clear()
+        self._original_modes.clear()
+        self._latest_digests.clear()
+        self.bytes_written = 0
+        return reverted
