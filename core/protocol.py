@@ -29,6 +29,7 @@ class RunStatus(str, Enum):
     UNVERIFIED_CHANGES = "unverified_changes"
     INCOMPLETE = "incomplete"
     FAILED = "failed"
+    ROLLED_BACK = "rolled_back"
 
 
 class AuditEvent(BaseModel):
