@@ -145,7 +145,6 @@ class ToolRegistry:
         passed = completed.returncode == 0
         # unittest discover can exit zero when no tests were found: that is not evidence.
         if argv in OPT_IN_CHECKS and "unittest" in argv:
-            import re
             match = re.search(r"Ran (\d+) tests?", output)
             if not match or int(match.group(1)) == 0:
                 passed = False
