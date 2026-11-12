@@ -104,9 +104,9 @@ class Workspace:
                 if full.is_symlink() or not full.is_file():
                     continue
                 rel = full.relative_to(self.root).as_posix()
-                output.append(rel)
                 if len(output) >= limit:
                     return "\n".join(output) + "\n[listing limited]"
+                output.append(rel)
         return "\n".join(output) or "[no visible files]"
 
     def read_file(self, name: str) -> str:
@@ -124,7 +124,8 @@ class Workspace:
         if not 2 <= len(query) <= 150:
             raise WorkspaceError("Search query must be 2-150 characters.")
         matches: list[str] = []
-        for name in self.list_files().splitlines():
+        files = self.list_files().splitlines()
+        for name in files:
             if not name or name.startswith("["):
                 continue
             try:
@@ -136,7 +137,10 @@ class Workspace:
                     matches.append(f"{name}:{line_no}: {line[:200]}")
                     if len(matches) >= 30:
                         return "\n".join(matches) + "\n[matches limited]"
-        return "\n".join(matches) or "[no matches]"
+        result = "\n".join(matches) or "[no matches]"
+        if "[listing limited]" in files:
+            result += "\n[search limited]"
+        return result
 
     def preview_write(self, name: str, content: str) -> FilePreview:
         """Show an exact proposed change, including a baseline digest for conflict checks.
